@@ -63,7 +63,18 @@ spec:
                   "urls": ["https://registry-1.docker.io"],
                   "content": [
                     {"prefix": "vikunja/**"},
-                    {"prefix": "library/**"}
+                    {"prefix": "library/**"},
+                    {"prefix": "longhornio/**"},
+                    {"prefix": "myoung34/**"},
+                    {"prefix": "curlimages/**"}
+                  ],
+                  "onDemand": true,
+                  "tlsVerify": true
+                },
+                {
+                  "urls": ["https://ghcr.io"],
+                  "content": [
+                    {"prefix": "cloudnative-pg/**"}
                   ],
                   "onDemand": true,
                   "tlsVerify": true
