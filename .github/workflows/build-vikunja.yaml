@@ -14,6 +14,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The runner image ships a containers.conf with a [machine] section its
+      # older buildah can't parse, causing warning spam. Built-in defaults apply.
+      - name: Silence buildah containers.conf warnings
+        run: printf '' > /usr/share/containers/containers.conf || true
+
       - name: Build image
         run: |
           buildah bud \
