@@ -13,7 +13,7 @@ RUN npm install -g corepack && corepack enable && \
 COPY frontend/ ./
 RUN pnpm run build
 
-FROM golang:1.24-alpine AS backend
+FROM golang:1.25-alpine AS backend
 
 RUN apk add --no-cache git make
 WORKDIR /build
