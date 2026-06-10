@@ -16,7 +16,7 @@ jobs:
 
       - name: Build image
         run: |
-          buildah build \
+          buildah bud \
             --format docker \
             -t zot-workshop-akasha.cl8s.dev/vikunja/vikunja:${{ github.sha }} \
             -t zot-workshop-akasha.cl8s.dev/vikunja/vikunja:latest \
