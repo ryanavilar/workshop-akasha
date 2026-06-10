@@ -1,0 +1,149 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: hsts
+  namespace: default
+spec:
+  headers:
+    stsSeconds: 31536000
+    stsIncludeSubdomains: true
+    stsPreload: true
+    forceSTSHeader: true
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vikunja-files
+  namespace: default
+spec:
+  storageClassName: longhorn
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vikunja-env
+  namespace: default
+data:
+  VIKUNJA_DATABASE_TYPE: postgres
+  VIKUNJA_DATABASE_HOST: workshop-db-rw.default.svc.cluster.local
+  VIKUNJA_DATABASE_PORT: "5432"
+  VIKUNJA_DATABASE_DATABASE: vikunja
+  VIKUNJA_DATABASE_SSLMODE: require
+  VIKUNJA_SERVICE_PUBLICURL: https://todo-workshop-akasha.cl8s.dev/
+  VIKUNJA_SERVICE_FRONTENDURL: https://todo-workshop-akasha.cl8s.dev/
+  VIKUNJA_FILES_BASEPATH: /app/vikunja/files
+  VIKUNJA_FILES_MAXSIZE: "20971520"
+  VIKUNJA_SERVICE_ENABLECORS: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vikunja
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vikunja
+  template:
+    metadata:
+      labels:
+        app: vikunja
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/worker: worker
+      volumes:
+        - name: vikunja-files
+          persistentVolumeClaim:
+            claimName: vikunja-files
+      containers:
+        - name: vikunja
+          image: zot-workshop-akasha.cl8s.dev/vikunja/vikunja:latest
+          volumeMounts:
+            - mountPath: /app/vikunja/files
+              name: vikunja-files
+          envFrom:
+            - configMapRef:
+                name: vikunja-env
+          env:
+            - name: VIKUNJA_DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-db-user
+                  key: username
+            - name: VIKUNJA_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: workshop-db-user
+                  key: password
+          ports:
+            - containerPort: 3456
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3456
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3456
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vikunja
+  namespace: default
+spec:
+  selector:
+    app: vikunja
+  type: ClusterIP
+  ports:
+    - port: 3456
+      targetPort: 3456
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vikunja
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+    nginx.ingress.kubernetes.io/proxy-buffering: "on"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-hsts@kubernetescrd
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - todo-workshop-akasha.cl8s.dev
+      secretName: vikunja-tls
+  rules:
+    - host: todo-workshop-akasha.cl8s.dev
+      http:
+        paths:
+          - path: "/"
+            pathType: Prefix
+            backend:
+              service:
+                name: vikunja
+                port:
+                  number: 3456

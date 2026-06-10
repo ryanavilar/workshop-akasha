@@ -1,0 +1,487 @@
+// Vikunja is a to-do list application to facilitate your life.
+// Copyright 2018-present Vikunja and contributors. All rights reserved.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package models
+
+import (
+	"fmt"
+	"strings"
+
+	"code.vikunja.io/api/pkg/db"
+	"code.vikunja.io/api/pkg/web"
+
+	"xorm.io/builder"
+	"xorm.io/xorm"
+	"xorm.io/xorm/schemas"
+)
+
+type SubTableFilter struct {
+	Table           string
+	BaseFilter      string
+	FilterableField string
+	AllowNullCheck  bool
+}
+
+type SubTableFilters map[string]SubTableFilter
+
+var subTableFilters = SubTableFilters{
+	"labels": {
+		Table:           "label_tasks",
+		BaseFilter:      "tasks.id = task_id",
+		FilterableField: "label_id",
+		AllowNullCheck:  true,
+	},
+	"label_id": {
+		Table:           "label_tasks",
+		BaseFilter:      "tasks.id = task_id",
+		FilterableField: "label_id",
+		AllowNullCheck:  true,
+	},
+	"reminders": {
+		Table:           "task_reminders",
+		BaseFilter:      "tasks.id = task_id",
+		FilterableField: "reminder",
+		AllowNullCheck:  true,
+	},
+	"assignees": {
+		Table:           "task_assignees",
+		BaseFilter:      "tasks.id = task_id",
+		FilterableField: "username",
+		AllowNullCheck:  true,
+	},
+	"parent_project": {
+		Table:           "projects",
+		BaseFilter:      "tasks.project_id = id",
+		FilterableField: "parent_project_id",
+		AllowNullCheck:  false,
+	},
+	"parent_project_id": {
+		Table:           "projects",
+		BaseFilter:      "tasks.project_id = id",
+		FilterableField: "parent_project_id",
+		AllowNullCheck:  false,
+	},
+}
+
+var strictComparators = map[taskFilterComparator]bool{
+	taskFilterComparatorIn:        true,
+	taskFilterComparatorNotIn:     true,
+	taskFilterComparatorEquals:    true,
+	taskFilterComparatorNotEquals: true,
+}
+
+// isRangeComparator returns true for comparators where combining multiple
+// conditions into a single EXISTS subquery is semantically correct (i.e. a
+// single row can satisfy both conditions simultaneously).
+func isRangeComparator(c taskFilterComparator) bool {
+	return c == taskFilterComparatorGreater ||
+		c == taskFilterComparatorGreateEquals ||
+		c == taskFilterComparatorLess ||
+		c == taskFilterComparatorLessEquals
+}
+
+type taskSearcher interface {
+	Search(opts *taskSearchOptions) (tasks []*Task, totalCount int64, err error)
+}
+
+type dbTaskSearcher struct {
+	s                   *xorm.Session
+	a                   web.Auth
+	hasFavoritesProject bool
+}
+
+func (sf *SubTableFilter) ToBaseSubQuery() *builder.Builder {
+	var cond = builder.
+		Select("1").
+		From(sf.Table).
+		Where(builder.Expr(sf.BaseFilter))
+
+	// little hack to add users table for assignees filter
+	if sf.Table == "task_assignees" {
+		cond.Join("INNER", "users", "users.id = user_id")
+	}
+
+	return cond
+}
+
+func getOrderByDBStatement(opts *taskSearchOptions) (orderby string, err error) {
+	// Since xorm does not use placeholders for order by, it is possible to expose this with sql injection if we're directly
+	// passing user input to the db.
+	// As a workaround to prevent this, we check for valid column names here prior to passing it to the db.
+	for i, param := range opts.sortby {
+		// Validate the params
+		if err := param.validate(); err != nil {
+			return "", err
+		}
+
+		var prefix string
+		switch param.sortBy {
+		case taskPropertyPosition:
+			prefix = "task_positions."
+		case taskPropertyBucketID:
+			prefix = "task_buckets."
+		default:
+			prefix = "tasks."
+		}
+
+		// Mysql sorts columns with null values before ones without null value.
+		// Because it does not have support for NULLS FIRST or NULLS LAST we work around this by
+		// first sorting for null (or not null) values and then the order we actually want to.
+		if db.Type() == schemas.MYSQL {
+			orderby += prefix + "`" + param.sortBy + "` IS NULL, "
+		}
+
+		orderby += prefix + "`" + param.sortBy + "` " + param.orderBy.String()
+
+		// Postgres and sqlite allow us to control how columns with null values are sorted.
+		// To make that consistent with the sort order we have and other dbms, we're adding a separate clause here.
+		if db.Type() == schemas.POSTGRES || db.Type() == schemas.SQLITE {
+			orderby += " NULLS LAST"
+		}
+
+		if (i + 1) < len(opts.sortby) {
+			orderby += ", "
+		}
+	}
+
+	return
+}
+
+func convertFiltersToDBFilterCond(rawFilters []*taskFilter, includeNulls bool) (filterCond builder.Cond, err error) {
+
+	var dbFilters = make([]builder.Cond, 0, len(rawFilters))
+	// Track join types separately because after merging consecutive sub-table
+	// filters, the indexes of dbFilters no longer correspond 1:1 with rawFilters.
+	var dbFilterJoins = make([]taskFilterConcatinator, 0, len(rawFilters))
+
+	for i := 0; i < len(rawFilters); i++ {
+		f := rawFilters[i]
+
+		if nested, is := f.value.([]*taskFilter); is {
+			nestedDBFilters, err := convertFiltersToDBFilterCond(nested, includeNulls)
+			if err != nil {
+				return nil, err
+			}
+			dbFilters = append(dbFilters, nestedDBFilters)
+			dbFilterJoins = append(dbFilterJoins, f.join)
+			continue
+		}
+
+		subTableFilterParams, ok := subTableFilters[f.field]
+		if ok {
+			if f.field == "assignees" && (f.comparator == taskFilterComparatorLike) {
+				continue
+			}
+
+			// Collect all consecutive AND-joined range filters targeting the same sub-table.
+			// Only range comparators (>, >=, <, <=) are merged because they express
+			// conditions a single row can satisfy simultaneously (e.g. reminder > X AND
+			// reminder < Y). Equality/IN/NOT comparators must remain as separate EXISTS
+			// subqueries because each matching value lives in its own row (e.g.
+			// labels = 4 && labels = 5 means two different rows must each exist).
+			group := []*taskFilter{f}
+			if isRangeComparator(f.comparator) {
+				for i+1 < len(rawFilters) {
+					next := rawFilters[i+1]
+					nextSubTable, nextOk := subTableFilters[next.field]
+					if !nextOk || nextSubTable.Table != subTableFilterParams.Table || next.join != filterConcatAnd {
+						break
+					}
+					if !isRangeComparator(next.comparator) {
+						break
+					}
+					group = append(group, next)
+					i++
+				}
+			}
+
+			// Build the combined condition for all filters in the group
+			var combinedInnerCond builder.Cond
+			for _, gf := range group {
+				comparator := gf.comparator
+				_, isStrict := strictComparators[gf.comparator]
+				if isStrict {
+					comparator = taskFilterComparatorIn
+				}
+
+				innerFilter, err := getFilterCond(&taskFilter{
+					field:      subTableFilterParams.FilterableField,
+					value:      gf.value,
+					comparator: comparator,
+					isNumeric:  gf.isNumeric,
+				}, false)
+				if err != nil {
+					return nil, err
+				}
+
+				if combinedInnerCond == nil {
+					combinedInnerCond = innerFilter
+				} else {
+					combinedInnerCond = builder.And(combinedInnerCond, innerFilter)
+				}
+			}
+
+			filterSubQuery := subTableFilterParams.ToBaseSubQuery().And(combinedInnerCond)
+
+			var filter builder.Cond
+			if f.comparator == taskFilterComparatorNotEquals || f.comparator == taskFilterComparatorNotIn {
+				filter = builder.NotExists(filterSubQuery)
+			} else {
+				filter = builder.Exists(filterSubQuery)
+			}
+
+			if includeNulls && subTableFilterParams.AllowNullCheck {
+				filter = builder.Or(filter, builder.NotExists(subTableFilterParams.ToBaseSubQuery()))
+			}
+
+			dbFilters = append(dbFilters, filter)
+			// Use the join from the first filter in the group: f.join describes how
+			// this group connects to the previous element (matches the convention
+			// where dbFilterJoins[i+1] combines dbFilters[i] with dbFilters[i+1]).
+			dbFilterJoins = append(dbFilterJoins, f.join)
+			continue
+		}
+
+		if f.field == taskPropertyBucketID {
+			f.field = "task_buckets.`bucket_id`"
+		} else {
+			f.field = "tasks.`" + f.field + "`"
+		}
+		filter, err := getFilterCond(f, includeNulls)
+		if err != nil {
+			return nil, err
+		}
+		dbFilters = append(dbFilters, filter)
+		dbFilterJoins = append(dbFilterJoins, f.join)
+	}
+
+	if len(dbFilters) > 0 {
+		filterCond = dbFilters[0]
+		if len(dbFilters) >= 1 {
+			for i := range dbFilters {
+				if len(dbFilters) > i+1 {
+					switch dbFilterJoins[i+1] {
+					case filterConcatOr:
+						filterCond = builder.Or(filterCond, dbFilters[i+1])
+					case filterConcatAnd:
+						filterCond = builder.And(filterCond, dbFilters[i+1])
+					}
+				}
+			}
+		}
+	}
+
+	return filterCond, nil
+}
+
+func hasBucketIDInParsedFilter(filters []*taskFilter) bool {
+	for _, filter := range filters {
+		if subfilters, is := filter.value.([]*taskFilter); is {
+			has := hasBucketIDInParsedFilter(subfilters)
+			if has {
+				return true
+			}
+		}
+		if filter.field == taskPropertyBucketID {
+			return true
+		}
+	}
+
+	return false
+}
+
+//nolint:gocyclo
+func (d *dbTaskSearcher) Search(opts *taskSearchOptions) (tasks []*Task, totalCount int64, err error) {
+
+	orderby, err := getOrderByDBStatement(opts)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	joinTaskBuckets := hasBucketIDInParsedFilter(opts.parsedFilters)
+
+	filterCond, err := convertFiltersToDBFilterCond(opts.parsedFilters, opts.filterIncludeNulls)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Then return all tasks for that projects
+	var where builder.Cond
+
+	if opts.search != "" {
+		where = db.MultiFieldSearchWithTableAlias([]string{"title", "description"}, opts.search, "tasks")
+
+		searchIndex := getTaskIndexFromSearchString(opts.search)
+		if searchIndex > 0 {
+			where = builder.Or(where, builder.Eq{"`index`": searchIndex})
+		}
+	}
+
+	var projectIDCond builder.Cond
+	var favoritesCond builder.Cond
+	if len(opts.projectIDs) > 0 {
+		projectIDCond = builder.In("tasks.project_id", opts.projectIDs)
+	}
+
+	if d.hasFavoritesProject {
+		// All favorite tasks for that user
+		favCond := builder.
+			Select("entity_id").
+			From("favorites").
+			Where(
+				builder.And(
+					builder.Eq{"user_id": d.a.GetID()},
+					builder.Eq{"kind": FavoriteKindTask},
+				))
+
+		favoritesCond = builder.In("tasks.id", favCond)
+	}
+
+	limit, start := getLimitFromPageIndex(opts.page, opts.perPage)
+	cond := builder.And(builder.Or(projectIDCond, favoritesCond), where, filterCond)
+
+	var distinct = "tasks.*"
+	if strings.Contains(orderby, "task_positions.") {
+		distinct += ", task_positions.position"
+	}
+
+	var expandSubtasks = false
+	for _, expandable := range opts.expand {
+		if expandable == TaskCollectionExpandSubtasks {
+			expandSubtasks = true
+			break
+		}
+	}
+
+	if expandSubtasks {
+		cond = builder.And(cond, builder.Or(
+			builder.IsNull{"task_relations.id"},
+			builder.IsNull{"parent_tasks.id"},
+			builder.Expr("parent_tasks.project_id != tasks.project_id"),
+		))
+	}
+
+	query := d.s.
+		Distinct(distinct).
+		Where(cond)
+	if limit > 0 {
+		query = query.Limit(limit, start)
+	}
+
+	for _, param := range opts.sortby {
+		if param.sortBy == taskPropertyPosition {
+			query = query.Join("LEFT", "task_positions", "task_positions.task_id = tasks.id AND task_positions.project_view_id = ?", param.projectViewID)
+			break
+		}
+	}
+
+	if joinTaskBuckets {
+		joinCond := "task_buckets.task_id = tasks.id"
+		if opts.projectViewID > 0 {
+			joinCond += " AND task_buckets.project_view_id = ?"
+			query = query.Join("LEFT", "task_buckets", joinCond, opts.projectViewID)
+		} else {
+			query = query.Join("LEFT", "task_buckets", joinCond)
+		}
+	}
+	if expandSubtasks {
+		query = query.
+			Join("LEFT", "task_relations", "tasks.id = task_relations.task_id and task_relations.relation_kind = 'parenttask'").
+			Join("LEFT", "tasks parent_tasks", "task_relations.other_task_id = parent_tasks.id")
+	}
+
+	tasks = []*Task{}
+	err = query.
+		OrderBy(orderby).
+		Find(&tasks)
+	if err != nil {
+		sql, vals := query.LastSQL()
+		return nil, 0, fmt.Errorf("could not fetch tasks, error was '%w', sql: '%v', values: %v", err, sql, vals)
+	}
+
+	// fetch subtasks when expanding
+	if expandSubtasks && len(tasks) > 0 {
+		subtasks := []*Task{}
+
+		taskIDs := []any{}
+		for _, task := range tasks {
+			taskIDs = append(taskIDs, task.ID)
+		}
+
+		var inPlaceholders = strings.Repeat("?,", len(taskIDs))
+		inPlaceholders = inPlaceholders[:len(inPlaceholders)-1]
+
+		var notIn = strings.Repeat("?,", len(taskIDs))
+		notIn = notIn[:len(notIn)-1]
+
+		allArgs := make([]any, 0, len(taskIDs)*2)
+		allArgs = append(allArgs, taskIDs...)
+		allArgs = append(allArgs, taskIDs...)
+
+		err = d.s.SQL(`SELECT * FROM tasks WHERE id IN (WITH RECURSIVE sub_tasks AS (
+		SELECT task_id,
+			other_task_id,
+			relation_kind,
+			created_by_id,
+			created
+		FROM task_relations
+		WHERE task_id IN (`+inPlaceholders+`)
+		AND relation_kind = '`+string(RelationKindSubtask)+`'
+
+		UNION ALL
+
+		SELECT tr.task_id,
+			tr.other_task_id,
+			tr.relation_kind,
+			tr.created_by_id,
+			tr.created
+		FROM task_relations tr
+		INNER JOIN
+		sub_tasks st ON tr.task_id = st.other_task_id
+		WHERE tr.relation_kind = '`+string(RelationKindSubtask)+`')
+		SELECT other_task_id
+		FROM sub_tasks) AND id NOT IN (`+notIn+`)`, allArgs...).Find(&subtasks)
+		if err != nil {
+			return nil, totalCount, err
+		}
+
+		tasks = append(tasks, subtasks...)
+	}
+
+	queryCount := d.s.Where(cond)
+	if joinTaskBuckets {
+		joinCond := "task_buckets.task_id = tasks.id"
+		if opts.projectViewID > 0 {
+			joinCond += " AND task_buckets.project_view_id = ?"
+			queryCount = queryCount.Join("LEFT", "task_buckets", joinCond, opts.projectViewID)
+		} else {
+			queryCount = queryCount.Join("LEFT", "task_buckets", joinCond)
+		}
+	}
+	if expandSubtasks {
+		queryCount = queryCount.
+			Join("LEFT", "task_relations", "tasks.id = task_relations.task_id and task_relations.relation_kind = 'parenttask'").
+			Join("LEFT", "tasks parent_tasks", "task_relations.other_task_id = parent_tasks.id")
+	}
+	totalCount, err = queryCount.
+		Select("count(DISTINCT tasks.id)").
+		Count(&Task{})
+	if err != nil {
+		sql, vals := queryCount.LastSQL()
+		return nil, 0, fmt.Errorf("could not fetch task count, error was '%w', sql: '%v', values: %v", err, sql, vals)
+	}
+	return
+}

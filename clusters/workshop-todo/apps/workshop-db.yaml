@@ -1,0 +1,79 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: workshop-db
+  namespace: default
+spec:
+  imageName: ghcr.io/cloudnative-pg/postgresql:16
+  instances: 1
+  enableSuperuserAccess: false
+  primaryUpdateMethod: restart
+  primaryUpdateStrategy: unsupervised
+
+  bootstrap:
+    initdb:
+      database: vikunja
+      owner: vikunja
+      encoding: UTF8
+      localeCollate: C
+      localeCType: C
+
+  managed:
+    roles:
+      - name: vikunja
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        passwordSecret:
+          name: workshop-db-user
+
+  affinity:
+    nodeSelector:
+      workload: db
+    podAntiAffinityType: preferred
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: db
+        effect: NoSchedule
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  storage:
+    size: 5Gi
+    storageClass: longhorn
+
+  backup:
+    retentionPolicy: 7d
+    barmanObjectStore:
+      destinationPath: s3://icon-workshop/db-backups/workshop-db
+      endpointURL: https://ca8ead462e28b30f353ae9d3ca771142.r2.cloudflarestorage.com
+      s3Credentials:
+        accessKeyId:
+          name: workshop-db-backup-s3
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: workshop-db-backup-s3
+          key: ACCESS_SECRET_KEY
+
+  postgresql:
+    parameters:
+      shared_preload_libraries: ""
+      archive_mode: "on"
+      archive_timeout: 5min
+      wal_level: replica
+      wal_keep_size: 512MB
+      ssl_min_protocol_version: TLSv1.3
+      ssl_max_protocol_version: TLSv1.3
+
+  monitoring:
+    enablePodMonitor: false
+    disableDefaultQueries: false

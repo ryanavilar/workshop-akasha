@@ -1,0 +1,16 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: workshop-infra-services
+  namespace: flux-system
+spec:
+  interval: 1m
+  path: ./clusters/workshop-todo/infra-services
+  prune: false
+  sourceRef:
+    kind: GitRepository
+    name: workshop-akasha
+  dependsOn:
+    - name: workshop-infra
+  wait: true
+  timeout: 5m

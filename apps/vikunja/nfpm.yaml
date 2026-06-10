@@ -1,0 +1,38 @@
+name: "vikunja"
+arch: "<arch>"
+platform: "linux"
+version: "<version>"
+description: "Vikunja is an open-source todo application, written in Go. It lets you create lists,tasks and share them via teams or directly between users."
+maintainer: "Vikunja Maintainers <maintainers@vikunja.io>"
+homepage: "https://vikunja.io"
+section: "default"
+priority: "extra"
+license: "AGPLv3"
+depends:
+  - systemd
+rpm:
+  signature:
+    key_file: ${NFPM_GPG_KEY_FILE}
+overrides:
+  apk:
+    depends:
+      - openrc
+    scripts:
+      postinstall: ./build/after-install-openrc.sh
+contents:
+  - src: <binlocation>
+    dst: /opt/vikunja/vikunja
+  - src: ./config.yml.sample
+    dst: /etc/vikunja/config.yml
+    type: "config"
+  - src: /opt/vikunja/vikunja
+    dst: /usr/local/bin/vikunja
+    type: "symlink"
+  - src: vikunja.service
+    dst: /usr/lib/systemd/system/vikunja.service
+  - src: vikunja.initd
+    dst: /etc/init.d/vikunja
+    type: "config"
+    packager: apk
+scripts:
+  postinstall: ./build/after-install.sh

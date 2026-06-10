@@ -1,0 +1,9 @@
+.d-print-none {
+  @media print {
+    display: none !important;
+  }
+}
+
+.is-pulled-right {
+  float: right !important;
+}

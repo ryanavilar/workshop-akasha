@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: workshop-db-backup-s3
+  namespace: default
+  annotations:
+    kustomize.toolkit.fluxcd.io/reconcile: disabled
+type: Opaque
+stringData:
+  ACCESS_KEY_ID: CHANGE_ME
+  ACCESS_SECRET_KEY: CHANGE_ME

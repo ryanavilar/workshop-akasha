@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: workshop-db-user
+  namespace: default
+  annotations:
+    kustomize.toolkit.fluxcd.io/reconcile: disabled
+type: Opaque
+stringData:
+  username: vikunja
+  password: CHANGE_ME

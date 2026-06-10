@@ -1,0 +1,100 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "labels": [
+    "dependencies"
+  ],
+  "extends": [
+    "config:best-practices",
+    "config:js-app"
+  ],
+  "hostRules": [
+    {
+      "timeout": 600000
+    }
+  ],
+  "packageRules": [
+    {
+      "matchPackageNames": [
+        "happy-dom"
+      ],
+      "extends": [
+        "schedule:weekly"
+      ]
+    },
+    {
+      "groupName": "caniuse-and-related",
+      "matchPackageNames": [
+        "caniuse-lite",
+        "browserslist"
+      ],
+      "extends": [
+        "schedule:weekly"
+      ]
+    },
+    {
+      "groupName": "vueuse",
+      "matchPackageNames": [
+        "@vueuse/{/,}**"
+      ]
+    },
+    {
+      "groupName": "histoire",
+      "matchPackageNames": [
+        "@histoire/{/,}**",
+        "histoire{/,}**"
+      ]
+    },
+    {
+      "groupName": "tiptap",
+      "matchPackageNames": [
+        "@tiptap/{/,}**",
+        "tiptap{/,}**"
+      ]
+    },
+    {
+      "matchDepTypes": [
+        "devDependencies"
+      ],
+      "groupName": "dev-dependencies",
+      "extends": [
+        "schedule:daily"
+      ]
+    },
+    {
+      "groupName": "playwright",
+      "matchPackageNames": [
+        "@playwright/{/,}**",
+        "mcr.microsoft.com/playwright"
+      ]
+    },
+    {
+      "matchCategories": [
+        "github-actions",
+        "service"
+      ],
+      "extends": [
+        "schedule:weekly"
+      ]
+    },
+    {
+      "groupName": "node",
+      "matchPackageNames": [
+        "node"
+      ],
+      "matchManagers": [
+        "mise",
+        "nvm"
+      ]
+    },
+    {
+      "groupName": "pnpm",
+      "matchPackageNames": [
+        "pnpm"
+      ],
+      "matchManagers": [
+        "mise",
+        "npm"
+      ]
+    }
+  ]
+}
