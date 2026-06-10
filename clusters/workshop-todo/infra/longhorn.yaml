@@ -33,5 +33,18 @@ spec:
       createDefaultDiskLabeledNodes: true
       defaultDataPath: /var/mnt/longhorn
       defaultReplicaCount: 2
+      taintToleration: "workload=db:NoSchedule"
+    longhornManager:
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: db
+          effect: NoSchedule
+    longhornDriver:
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: db
+          effect: NoSchedule
     persistence:
       defaultClass: true
