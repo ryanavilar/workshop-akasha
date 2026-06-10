@@ -22,14 +22,14 @@ jobs:
       - name: Build image
         run: |
           buildah bud \
-            --format docker \
+            --format oci \
             -t zot-workshop-akasha.cl8s.dev/vikunja/vikunja:${{ github.sha }} \
             -t zot-workshop-akasha.cl8s.dev/vikunja/vikunja:latest \
             apps/vikunja/
 
       - name: Push to Zot
         run: |
-          buildah push --tls-verify=false \
+          buildah push --format oci --tls-verify=false \
             zot-workshop-akasha.cl8s.dev/vikunja/vikunja:${{ github.sha }}
-          buildah push --tls-verify=false \
+          buildah push --format oci --tls-verify=false \
             zot-workshop-akasha.cl8s.dev/vikunja/vikunja:latest
