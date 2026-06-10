@@ -1,3 +1,4 @@
+# Workshop image — built by the self-hosted runner and pushed to Zot
 FROM node:22-alpine AS frontend
 
 WORKDIR /build
